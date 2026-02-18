@@ -57,6 +57,9 @@ int main() {
         // Print rawData
         card.printRawData();
 
+        // Print indicatorVector 
+        card.printIndicatorVector();
+
     } else {
         std::cerr << "Failed to fetch data from API" << std::endl;
     }
