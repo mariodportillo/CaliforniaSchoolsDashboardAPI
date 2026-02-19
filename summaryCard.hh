@@ -72,8 +72,8 @@ public:
     const std::map<std::string, SummaryCard::indicator>& getCategoryMap() const;
     
     // print
-    bool printRawData();
-    bool printIndicatorVector();
+    bool printRawData() const;
+    bool printIndicatorVector() const;
 
     // Export methods
     bool saveToFile(const std::string& filename) const;

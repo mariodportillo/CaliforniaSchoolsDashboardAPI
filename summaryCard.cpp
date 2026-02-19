@@ -45,6 +45,8 @@ void SummaryCard::parseRawData() {
 void SummaryCard::clear() {
     rawData.clear();
     rawJsonData.clear();
+    indicatorsMap.clear();
+    indicatorVector.clear();
 }
 
 // Getters
@@ -66,7 +68,7 @@ const std::map<std::string, SummaryCard::indicator>& SummaryCard::getCategoryMap
 }
 
 // Print outs
-bool SummaryCard::printRawData() {
+bool SummaryCard::printRawData() const{
     if (rawData.empty()) {
         std::cerr << "Error: No raw data to print." << std::endl;
         return false;
@@ -77,7 +79,7 @@ bool SummaryCard::printRawData() {
 }
 
 
-bool SummaryCard::printIndicatorVector() {
+bool SummaryCard::printIndicatorVector() const{
     if (indicatorVector.empty()) {
         std::cerr << "Error: No indicator data to print." << std::endl;
         return false;
