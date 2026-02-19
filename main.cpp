@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <algorithm>
 #include <stdexcept>
+#include <thread>
+#include <pthread.h>
 
 // =============================================================================
 // Constants
@@ -168,8 +170,6 @@ static std::string findBestMatch(
     // -- Tier 1: Exact match (case-insensitive) --
     auto it = cdsLookup.find(query);
     if (it != cdsLookup.end()) {
-        std::cout << "[INFO] Exact match: \"" << schoolName
-                  << "\" -> \"" << originalNames.at(query) << "\"\n";
         return it->second;
     }
 
@@ -191,8 +191,6 @@ static std::string findBestMatch(
     }
 
     if (!substrMatchKey.empty()) {
-        std::cout << "[INFO] Substring match: \"" << schoolName
-                  << "\" -> \"" << originalNames.at(substrMatchKey) << "\"\n";
         return cdsLookup.at(substrMatchKey);
     }
 
@@ -209,17 +207,9 @@ static std::string findBestMatch(
     }
 
     if (!bestKey.empty() && bestDist <= MAX_EDIT_DISTANCE) {
-        std::cout << "[INFO] Fuzzy match (edit distance=" << bestDist << "): \""
-                  << schoolName << "\" -> \""
-                  << originalNames.at(bestKey) << "\"\n";
         return cdsLookup.at(bestKey);
     }
 
-    std::cerr << "[WARN] No match found for school: \"" << schoolName << "\"";
-    if (!bestKey.empty())
-        std::cerr << " (closest: \"" << originalNames.at(bestKey)
-                  << "\", edit distance=" << bestDist << ")";
-    std::cerr << "\n";
     return "";
 }
 
@@ -229,20 +219,24 @@ static std::string findBestMatch(
 
 /**
  * Populates `urls` with CA School Dashboard API endpoints for every valid
- * (school, year) pair found in `schools`.
+ * (school, year) pair found in `schools`. Also populates `urlMetadata` which
+ * maps each URL to its (schoolName, year) for post-fetch card enrichment.
  *
- * @param urls     Output vector that receives fully-formed URL strings.
- * @param schools  Map of { schoolName -> list of year strings (e.g. "2023") }.
+ * @param urls        Output vector of fully-formed URL strings.
+ * @param schools     Map of { schoolName -> list of year strings (e.g. "2023") }.
+ * @param urlMetadata Output map of { url -> (schoolName, year) }.
  *
- * Matching is case-insensitive and uses a three-tier strategy
- * (exact -> substring -> fuzzy) to find the best school name in the CSV.
- * Schools with no suitable match and unrecognised year strings are skipped
- * with a warning to stderr.
+ * Matching is case-insensitive with a three-tier strategy:
+ * exact -> substring -> fuzzy (Levenshtein, threshold MAX_EDIT_DISTANCE).
+ * Unmatched schools and unsupported years are skipped with a warning.
  *
  * URL format: BASE_URL + CDSCode + "/" + yearId + "/SummaryCards"
  */
-void buildURLVectorForSchools(std::vector<std::string>& urls,
-                               std::map<std::string, std::vector<std::string>>& schools) {
+void buildURLVectorForSchools(
+    std::vector<std::string>& urls,
+    std::map<std::string, std::vector<std::string>>& schools,
+    std::map<std::string, std::pair<std::string, std::string>>& urlMetadata)
+{
     static const std::string CSV_PATH = "../pubschls.csv";
 
     std::unordered_map<std::string, std::string> cdsLookup;
@@ -257,14 +251,197 @@ void buildURLVectorForSchools(std::vector<std::string>& urls,
 
     for (const auto& [schoolName, years] : schools) {
         std::string cds = findBestMatch(schoolName, cdsLookup, originalNames);
-        if (cds.empty()) continue; // no match within threshold, warning already logged
+        if (cds.empty()) continue;
 
         for (const std::string& year : years) {
             if (!validateYear(year)) continue;
             const std::string& yearId = YEAR_TO_ID.at(year);
-            urls.push_back(BASE_URL + cds + "/" + yearId + "/SummaryCards");
+            std::string url = BASE_URL + cds + "/" + yearId + "/SummaryCards";
+            urls.push_back(url);
+            // Record which school + year this URL belongs to so we can stamp
+            // the card after fetching (API responses only contain CDS codes).
+            urlMetadata[url] = {schoolName, year};
         }
     }
+}
+
+// =============================================================================
+// enrichCardsWithMetadata
+// =============================================================================
+
+// Arg passed to each stamping thread — owns a slice of the cards vector.
+struct EnrichArg {
+    std::vector<SummaryCard>* cards;
+    size_t start;
+    size_t end; // exclusive
+    const std::unordered_map<std::string, std::pair<std::string, std::string>>* lookup;
+    // lookup key: cdsCode + ":" + yearId  ->  (schoolName, year)
+};
+
+static void* enrichWorker(void* raw) {
+    auto* a = static_cast<EnrichArg*>(raw);
+    for (size_t i = a->start; i < a->end; ++i) {
+        SummaryCard& card = (*a->cards)[i];
+        const auto& indicators = card.getIndicatorVector();
+        if (indicators.empty()) continue;
+
+        // All indicators in a card share the same cdsCode and schoolYearId.
+        const std::string key = indicators[0].cdsCode + ":"
+                              + std::to_string(indicators[0].schoolYearId);
+
+        auto it = a->lookup->find(key);
+        if (it != a->lookup->end())
+            card.setMetadata(it->second.first, it->second.second);
+    }
+    return nullptr;
+}
+
+/**
+ * Builds a flat lookup from (cdsCode:yearId) -> (schoolName, year) by parsing
+ * each URL in urlMetadata, then spawns one thread per hardware core to stamp
+ * every card in allSummaryCardsVector with its school name and year.
+ *
+ * No locks needed: each thread owns a disjoint slice of the cards vector and
+ * the lookup map is read-only after construction.
+ *
+ * @param cards       The vector of fetched SummaryCards to enrich (mutated).
+ * @param urlMetadata URL -> (schoolName, year) built during URL construction.
+ */
+void enrichCardsWithMetadata(
+    std::vector<SummaryCard>& cards,
+    const std::map<std::string, std::pair<std::string, std::string>>& urlMetadata)
+{
+    if (cards.empty() || urlMetadata.empty()) return;
+
+    // --- Build the flat lookup (single-threaded, O(n), negligible cost) ---
+    // Key: "cdsCode:yearId"  e.g. "19649071937028:7"
+    std::unordered_map<std::string, std::pair<std::string, std::string>> lookup;
+    lookup.reserve(urlMetadata.size());
+
+    for (const auto& [url, meta] : urlMetadata) {
+        // URL format: BASE_URL + cdsCode + "/" + yearId + "/SummaryCards"
+        std::string stripped = url.substr(BASE_URL.size());
+        size_t slash1 = stripped.find('/');
+        size_t slash2 = stripped.find('/', slash1 + 1);
+        if (slash1 == std::string::npos || slash2 == std::string::npos) continue;
+        std::string cds    = stripped.substr(0, slash1);
+        std::string yearId = stripped.substr(slash1 + 1, slash2 - slash1 - 1);
+        lookup[cds + ":" + yearId] = meta;
+    }
+
+    // --- Spawn one thread per logical core, each owning a slice of cards ---
+    const size_t n        = cards.size();
+    const size_t nThreads = std::max(1u, std::thread::hardware_concurrency());
+    const size_t chunk    = (n + nThreads - 1) / nThreads; // ceiling division
+
+    std::vector<EnrichArg>    args(nThreads);
+    std::vector<pthread_t>    tids(nThreads);
+    size_t                    spawned = 0;
+
+    for (size_t t = 0; t < nThreads; ++t) {
+        size_t start = t * chunk;
+        if (start >= n) break; // fewer cards than cores
+
+        args[t] = { &cards, start, std::min(start + chunk, n), &lookup };
+
+        int err = pthread_create(&tids[t], nullptr, enrichWorker, &args[t]);
+        if (err) {
+            fprintf(stderr, "[WARN] enrichCardsWithMetadata: pthread_create failed: %s\n",
+                    strerror(err));
+            // Fall back: do this slice on the calling thread
+            enrichWorker(&args[t]);
+        } else {
+            ++spawned;
+        }
+    }
+
+    for (size_t t = 0; t < spawned; ++t)
+        pthread_join(tids[t], nullptr);
+}
+
+
+// =============================================================================
+// buildAllSchoolsMap
+// =============================================================================
+
+/**
+ * Reads every active school from pubschls.csv and returns a map of
+ * { originalSchoolName -> years } ready to pass into buildURLVectorForSchools.
+ *
+ * Duplicate school names (same name, different districts) are deduplicated by
+ * appending the CDSCode in parentheses so both entries are preserved:
+ *   "Lincoln High (19647331934609)"
+ *   "Lincoln High (19730106053658)"
+ *
+ * @param years   The year strings to assign to every school (e.g. {"2022","2023"}).
+ * @param csvPath Path to pubschls.csv (default: "../pubschls.csv").
+ * @returns       Map of { schoolName -> years }.
+ */
+std::map<std::string, std::vector<std::string>> buildAllSchoolsMap(
+    const std::vector<std::string>& years,
+    const std::string& csvPath = "../pubschls.csv")
+{
+    std::map<std::string, std::vector<std::string>> schools;
+
+    std::ifstream file(csvPath);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] buildAllSchoolsMap: cannot open CSV: " << csvPath << "\n";
+        return schools;
+    }
+
+    // Track seen names so duplicates get a CDS suffix.
+    std::unordered_map<std::string, int> nameSeen;
+
+    std::string line;
+    bool isHeader = true;
+
+    while (std::getline(file, line)) {
+        // Strip UTF-8 BOM on first line.
+        if (isHeader) {
+            if (line.size() >= 3 &&
+                static_cast<unsigned char>(line[0]) == 0xEF &&
+                static_cast<unsigned char>(line[1]) == 0xBB &&
+                static_cast<unsigned char>(line[2]) == 0xBF)
+                line.erase(0, 3);
+            isHeader = false;
+            continue;
+        }
+
+        auto fields = parseCSVLine(line);
+        if (fields.size() < 7) continue;
+
+        const std::string& cds        = fields[0]; // CDSCode
+        const std::string& statusType = fields[3]; // StatusType
+        const std::string& school     = fields[6]; // School
+
+        if (school.empty() || cds.empty()) continue;
+        if (statusType != "Active") continue;
+
+        std::string key = school;
+
+        // On first collision rename the original entry with its CDS suffix,
+        // then every subsequent collision also gets one.
+        if (nameSeen[school]++ == 1) {
+            // The original (collision-free) entry needs renaming too.
+            // Find it and re-insert under a disambiguated key.
+            auto it = schools.find(school);
+            if (it != schools.end()) {
+                // We don't have the original CDS here, so mark it as ambiguous.
+                std::string disambig = school + " (ambiguous)";
+                schools[disambig] = std::move(it->second);
+                schools.erase(it);
+            }
+        }
+
+        if (nameSeen[school] > 1)
+            key = school + " (" + cds + ")";
+
+        schools[key] = years;
+    }
+
+    std::cout << "[INFO] buildAllSchoolsMap: loaded " << schools.size()
+              << " active schools from CSV.\n";
+    return schools;
 }
 
 // =============================================================================
@@ -275,16 +452,19 @@ int main()
 {
     CaliforniaDashboardAPI api;
     std::vector<std::string> urls;
-    std::vector<std::string> years = {"2022", "2023", "2024"};
-    std::map<std::string, std::vector<std::string>> schools = {
-        {"Pomona High School",        years},
-        {"Diamond Ranch High School", years},
-        {"Garey High School", years},
-        {"Palo Alto High School", years}
-    };
+    std::vector<std::string> years = {"2021", "2022", "2023", "2024"};
 
-    buildURLVectorForSchools(urls, schools);
-    
+    // Build a schools map containing every active CA public school.
+    // Swap this for a hand-crafted map to target specific schools instead.
+    std::map<std::string, std::vector<std::string>> schools =
+        buildAllSchoolsMap(years);
+
+    // urlMetadata maps each URL -> (schoolName, year) so cards can be labelled
+    // after fetching, since the API responses only contain CDS codes.
+    std::map<std::string, std::pair<std::string, std::string>> urlMetadata;
+
+    buildURLVectorForSchools(urls, schools, urlMetadata);
+
     if (!api.loadInURLs(urls)) {
         std::cerr << "Failed to load URLs" << std::endl;
         return 1;
@@ -296,6 +476,8 @@ int main()
         std::cerr << "Failed to fetch data" << std::endl;
         return 1;
     }
+
+    enrichCardsWithMetadata(api.allSummaryCardsVector, urlMetadata);
 
     std::cout << "\nData fetched successfully!" << std::endl;
 

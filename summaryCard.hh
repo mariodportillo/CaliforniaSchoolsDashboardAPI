@@ -1,13 +1,10 @@
 #ifndef SUMMARYCARD_H
 #define SUMMARYCARD_H
-
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 #include <map>
 
-
-// Main SummaryCard class
 class SummaryCard {
     std::map<int, std::string> indicatorsMap = {
         {1, "CHRONIC_ABSENTEEISM"},
@@ -20,7 +17,7 @@ class SummaryCard {
         {8, "SCIENCE"}
     };
 
-    struct indicator{
+    struct indicator {
         std::string indicatorCategory;
         nlohmann::json primary;
         nlohmann::json secondary;
@@ -42,40 +39,48 @@ class SummaryCard {
         size_t schoolYearId;
         bool isPrivateData;
     };
+
 private:
     std::string rawData;
     nlohmann::json rawJsonData;
-    std::vector<SummaryCard::indicator> indicatorVector; 
+    std::vector<SummaryCard::indicator> indicatorVector;
     SummaryCard::indicator parseIndicator(const nlohmann::json& entry);
     std::vector<SummaryCard::indicator> parseIndicators(const nlohmann::json& data);
     std::map<std::string, SummaryCard::indicator> categoryToIndicatorMap;
-    
+
 public:
+    // Metadata — school name and year this card was fetched for.
+    // Set via setMetadata() after fetching.
+    std::string schoolName;
+    std::string year;
 
     // Constructors
     SummaryCard();
     explicit SummaryCard(const std::string& jsonString);
-    
+
     // Destructor
     ~SummaryCard();
-    
-    // Data manipulation methods
+
+    // Data manipulation
     void setRawData(const std::string& data);
     void appendRawData(const char* data, size_t size);
     void parseRawData();
     void clear();
- 
+
+    // Stamps school name and year onto the card after fetching.
+    void setMetadata(const std::string& school, const std::string& yr);
+
     // Getters
     const std::string& getRawData() const;
     const nlohmann::json& getRawJsonData() const;
     std::vector<SummaryCard::indicator> getIndicatorVector() const;
     const std::map<std::string, SummaryCard::indicator>& getCategoryMap() const;
-    
-    // print
+
+    // Print
     bool printRawData() const;
     bool printIndicatorVector() const;
 
-    // Export methods
+    // Export
     bool saveToFile(const std::string& filename) const;
     bool loadFromFile(const std::string& filename);
 };

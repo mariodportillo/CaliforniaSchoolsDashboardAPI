@@ -9,7 +9,7 @@ using json = nlohmann::json;
 // =============================================================================
 
 SummaryCard::SummaryCard(){
-    rawData    = "";
+    rawData     = "";
     rawJsonData = json::array();
 }
 
@@ -53,6 +53,15 @@ void SummaryCard::clear() {
     indicatorsMap.clear();
     indicatorVector.clear();
     categoryToIndicatorMap.clear();
+    schoolName.clear();
+    year.clear();
+}
+
+// Stamps the human-readable school name and year onto the card.
+// Called after fetching, using the reverse lookup built in main.
+void SummaryCard::setMetadata(const std::string& school, const std::string& yr) {
+    schoolName = school;
+    year       = yr;
 }
 
 // =============================================================================
@@ -93,6 +102,15 @@ bool SummaryCard::printIndicatorVector() const {
         std::cerr << "Error: No indicator data to print." << std::endl;
         return false;
     }
+
+    // Print card-level metadata if available
+    if (!schoolName.empty() || !year.empty()) {
+        std::cout << "=============================\n"
+                  << "School: " << (schoolName.empty() ? "Unknown" : schoolName) << "\n"
+                  << "Year:   " << (year.empty()       ? "Unknown" : year)       << "\n"
+                  << "=============================\n";
+    }
+
     for (const auto& ind : indicatorVector) {
         std::cout << "-----------------------------\n"
                   << "Category:     " << ind.indicatorCategory << "\n"
@@ -153,7 +171,7 @@ static std::string safeString(const json& obj, const std::string& key,
                                const std::string& defaultVal = "") {
     if (!obj.contains(key) || obj[key].is_null()) return defaultVal;
     if (obj[key].is_string()) return obj[key].get<std::string>();
-    return obj[key].dump(); // coerce numbers/bools to string if needed
+    return obj[key].dump();
 }
 
 static int safeInt(const json& obj, const std::string& key, int defaultVal = 0) {
@@ -195,7 +213,6 @@ SummaryCard::indicator SummaryCard::parseIndicator(const json& entry) {
         return ind;
     }
 
-    // indicatorId is size_t; indicatorsMap is keyed by int
     ind.indicatorId = safeSizeT(entry, "indicatorId");
 
     auto it = indicatorsMap.find(static_cast<int>(ind.indicatorId));
@@ -233,7 +250,6 @@ SummaryCard::indicator SummaryCard::parseIndicator(const json& entry) {
 std::vector<SummaryCard::indicator> SummaryCard::parseIndicators(const json& data) {
     std::vector<indicator> result;
 
-    // API can return either an array or a single object — handle both.
     if (data.is_null()) return result;
 
     const json& arr = data.is_array() ? data : json::array({data});
