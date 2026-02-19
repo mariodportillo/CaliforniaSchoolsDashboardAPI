@@ -128,8 +128,37 @@ CURLcode CaliforniaDashboardAPI::fetchSummaryCard(const std::string &url,
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
     CURLcode result = curl_easy_perform(curl);
-    if (result != CURLE_OK)
+    if (result != CURLE_OK) {
         fprintf(stderr, "CURL Error [%s]: %s\n", url.c_str(), curl_easy_strerror(result));
+        curl_easy_cleanup(curl);
+        return result;
+    }
+
+    // Validate HTTP status — don't attempt to parse 4xx/5xx responses
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (http_code < 200 || http_code >= 300) {
+        fprintf(stderr, "HTTP Error [%ld] for URL: %s\n", http_code, url.c_str());
+        curl_easy_cleanup(curl);
+        return CURLE_HTTP_RETURNED_ERROR;
+    }
+
+    // Guard against empty response
+    const std::string& raw = card.getRawData();
+    if (raw.empty()) {
+        fprintf(stderr, "Empty response for URL: %s\n", url.c_str());
+        curl_easy_cleanup(curl);
+        return CURLE_GOT_NOTHING;
+    }
+
+    // Quick sanity check — valid JSON must start with '{' or '['
+    size_t first = raw.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos || (raw[first] != '{' && raw[first] != '[')) {
+        fprintf(stderr, "Invalid JSON for URL: %s\nResponse preview: %s\n",
+                url.c_str(), raw.substr(0, 200).c_str());
+        curl_easy_cleanup(curl);
+        return CURLE_GOT_NOTHING;
+    }
 
     card.parseRawData();
     curl_easy_cleanup(curl);
