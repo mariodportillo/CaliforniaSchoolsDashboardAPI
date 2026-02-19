@@ -13,69 +13,72 @@
 
 class CaliforniaDashboardAPI {
 public:
-    // Max concurrent HTTP requests. Tune this to taste:
-    //   64  — safe default, works on most systems
-    //   128 — faster, requires ulimit -n > 256
-    //   256 — aggressive, verify your fd limit first: `ulimit -n`
-    // Tune these to avoid rate-limiting from the API server.
-    // Lower pool_size = fewer simultaneous connections.
-    // Higher request_delay_ms = more breathing room between each worker's fetches.
+    // -- Tuning knobs ---------------------------------------------------------
+    // pool_size:            number of persistent worker threads.
+    //                       Each worker owns one CURL handle and reuses its
+    //                       TCP/TLS connection, so more workers = more
+    //                       parallel connections to the server.
+    //
+    // max_requests_per_sec: global token-bucket cap across ALL workers.
+    //                       The server was refusing connections at >8 req/sec
+    //                       without browser headers; with them it tolerates
+    //                       much higher rates. Start at 20 and back off if
+    //                       you see connection errors.
+    //
+    // timeout_ms:           per-request timeout. 30s is generous; the API
+    //                       usually responds in <2s on a live connection.
+    static constexpr std::size_t DEFAULT_POOL_SIZE            = 20;
+    static constexpr double      DEFAULT_MAX_REQUESTS_PER_SEC = 20.0;
+    static constexpr long        DEFAULT_TIMEOUT_MS           = 30'000;
 
-    explicit CaliforniaDashboardAPI(long        timeout_ms           = 30'000,
-                                    std::size_t pool_size            = DEFAULT_POOL_SIZE,
-                                    long        request_delay_ms     = DEFAULT_REQUEST_DELAY_MS,
-                                    double      max_requests_per_sec = 8.0);
-    static constexpr std::size_t DEFAULT_POOL_SIZE        = 20;
-    static constexpr long        DEFAULT_REQUEST_DELAY_MS = 100; // ms between fetches per worker
+    explicit CaliforniaDashboardAPI(
+        long        timeout_ms           = DEFAULT_TIMEOUT_MS,
+        std::size_t pool_size            = DEFAULT_POOL_SIZE,
+        double      max_requests_per_sec = DEFAULT_MAX_REQUESTS_PER_SEC);
+
     ~CaliforniaDashboardAPI();
 
     bool loadInURLs(const std::vector<std::string>& urls);
-
-    // Fetches all loaded URLs using a bounded thread pool (pool_size_ workers).
-    // Workers pull URLs from a shared queue until it is drained, then exit.
     bool runFullURLFetch();
 
     std::vector<SummaryCard> allSummaryCardsVector;
 
 private:
-    // -- Thread pool internals ------------------------------------------------
+    // -- Work queue -----------------------------------------------------------
     struct WorkQueue {
         std::queue<std::string> items;
         std::mutex              mtx;
         std::condition_variable cv;
-        bool                    done = false; // signals no more work will be enqueued
+        bool                    done = false;
     };
 
+    // Each worker carries its own persistent CURL handle so TCP/TLS
+    // connections are reused across requests to the same host.
     struct PoolWorkerArg {
         CaliforniaDashboardAPI* self;
         WorkQueue*              queue;
+        CURL*                   curl; // owned by this worker, init'd before spawn
     };
 
     static void* poolWorker(void* raw);
 
-    // -- Fetch helpers (used by pool workers) ---------------------------------
+    // -- Per-request fetch (takes a pre-initialised CURL handle) --------------
     static size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata);
-    CURLcode fetchSummaryCard(const std::string& url, SummaryCard& card);
+    CURLcode fetchSummaryCard(CURL* curl, const std::string& url, SummaryCard& card);
 
-    // -- Token bucket rate limiter -------------------------------------------
-    // All workers call acquireToken() before each fetch. If the bucket is empty
-    // they block until a token is available, capping global throughput at
-    // max_requests_per_sec_ regardless of pool size.
+    // -- Token bucket rate limiter --------------------------------------------
     void acquireToken();
 
     long        timeout_ms_;
     std::size_t pool_size_;
-    long        request_delay_ms_;
     double      max_requests_per_sec_;
 
-    // Token bucket state
-    double                  tokens_;          // current available tokens
-    struct timespec         last_refill_;     // last time tokens were added
-    std::mutex              rate_mutex_;      // guards token bucket state
-    std::condition_variable rate_cv_;
+    double          tokens_;
+    struct timespec last_refill_;
+    std::mutex      rate_mutex_;
 
-    std::atomic<std::size_t> completed_{0}; // tracks fetch progress
-    std::size_t              total_{0};       // total URLs to fetch
+    std::atomic<std::size_t> completed_{0};
+    std::size_t              total_{0};
 
     std::vector<std::string> urls_;
     std::mutex               mutex_; // guards allSummaryCardsVector
