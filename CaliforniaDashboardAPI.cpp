@@ -3,6 +3,25 @@
 #include <cstdio>
 #include <stdexcept>
 #include <time.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+
+// =============================================================================
+// CURLSH lock/unlock callbacks — required for thread-safe share handle
+// =============================================================================
+
+// CURLSH needs external lock/unlock functions because it has no threading
+// knowledge of its own. We use four mutexes (one per data type it shares).
+static pthread_mutex_t share_locks[CURL_LOCK_DATA_LAST];
+
+static void share_lock(CURL*, curl_lock_data data, curl_lock_access, void*) {
+    pthread_mutex_lock(&share_locks[data]);
+}
+static void share_unlock(CURL*, curl_lock_data data, void*) {
+    pthread_mutex_unlock(&share_locks[data]);
+}
 
 // =============================================================================
 // Constructor / Destructor
@@ -20,9 +39,46 @@ CaliforniaDashboardAPI::CaliforniaDashboardAPI(long timeout_ms, std::size_t pool
         throw std::runtime_error(std::string("curl_global_init: ") +
                                  curl_easy_strerror(rc));
     clock_gettime(CLOCK_MONOTONIC, &last_refill_);
+
+    // Detect CA bundle path once at construction — avoids races when
+    // many threads all try to auto-detect it simultaneously at startup.
+    const char* ca_candidates[] = {
+        "/etc/ssl/cert.pem",                        // macOS Homebrew curl
+        "/etc/ssl/certs/ca-certificates.crt",       // Debian/Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",         // RHEL/CentOS
+        "/usr/local/etc/openssl/cert.pem",           // macOS MacPorts
+        nullptr
+    };
+    for (int i = 0; ca_candidates[i]; ++i) {
+        if (access(ca_candidates[i], R_OK) == 0) {
+            ca_bundle_path_ = ca_candidates[i];
+            fprintf(stderr, "[SSL] Using CA bundle: %s\n", ca_bundle_path_.c_str());
+            break;
+        }
+    }
+    if (ca_bundle_path_.empty())
+        fprintf(stderr, "[SSL] No CA bundle found — curl will use its default\n");
+
+    // Initialise share-lock mutexes
+    for (int i = 0; i < CURL_LOCK_DATA_LAST; ++i)
+        pthread_mutex_init(&share_locks[i], nullptr);
+
+    // Create the shared handle — workers share DNS cache and SSL sessions.
+    // This means DNS is resolved once and the result is reused by all workers,
+    // and TLS session tickets are shared so resumed handshakes are faster.
+    curl_share_ = curl_share_init();
+    if (curl_share_) {
+        curl_share_setopt(curl_share_, CURLSHOPT_LOCKFUNC,   share_lock);
+        curl_share_setopt(curl_share_, CURLSHOPT_UNLOCKFUNC, share_unlock);
+        curl_share_setopt(curl_share_, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        // SSL session sharing removed — causes CA cert corruption under high concurrency
+    }
 }
 
 CaliforniaDashboardAPI::~CaliforniaDashboardAPI() {
+    if (curl_share_) curl_share_cleanup(curl_share_);
+    for (int i = 0; i < CURL_LOCK_DATA_LAST; ++i)
+        pthread_mutex_destroy(&share_locks[i]);
     curl_global_cleanup();
 }
 
@@ -73,9 +129,16 @@ bool CaliforniaDashboardAPI::runFullURLFetch()
         return false;
     }
 
-    allSummaryCardsVector.reserve(allSummaryCardsVector.size() + urls_.size());
-    total_     = urls_.size();
+    const std::size_t total    = urls_.size();
+    const std::size_t base_slot = allSummaryCardsVector.size(); // existing elements
+    total_     = total;
     completed_ = 0;
+    next_slot_ = base_slot; // start slots AFTER any pre-existing cards
+
+    // Pre-size the results vector to exactly the number of URLs.
+    // Workers write directly into their pre-allocated slot using an atomic
+    // index — no mutex required on the hot path at all.
+    allSummaryCardsVector.resize(base_slot + total);
 
     // Fill work queue
     WorkQueue queue;
@@ -85,26 +148,71 @@ bool CaliforniaDashboardAPI::runFullURLFetch()
             queue.items.push(url);
     }
 
-    const std::size_t n = std::min(pool_size_, urls_.size());
+    const std::size_t n = std::min(pool_size_, total);
     std::vector<pthread_t>     tids(n);
     std::vector<PoolWorkerArg> args(n);
 
-    // Initialise one persistent CURL handle per worker BEFORE spawning.
-    // Setting options here means they are inherited for every request the
-    // worker makes — headers, keep-alive, DNS cache, etc. are set once.
+    // -- Pre-resolve the API hostname ONCE before spawning any workers --------
+    // All 50 workers firing DNS lookups simultaneously overwhelms the local
+    // resolver. Instead we resolve once here, cache the result, and inject
+    // it into every handle via CURLOPT_RESOLVE so workers skip DNS entirely.
+    static const std::string API_HOST = "api.caschooldashboard.org";
+    struct curl_slist* resolve_list = nullptr;
+    {
+        // Use getaddrinfo to resolve the hostname
+        struct addrinfo hints{}, *res = nullptr;
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(API_HOST.c_str(), "443", &hints, &res) == 0 && res) {
+            char ipbuf[INET6_ADDRSTRLEN] = {};
+            if (res->ai_family == AF_INET) {
+                inet_ntop(AF_INET,
+                    &reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr,
+                    ipbuf, sizeof(ipbuf));
+            } else if (res->ai_family == AF_INET6) {
+                inet_ntop(AF_INET6,
+                    &reinterpret_cast<sockaddr_in6*>(res->ai_addr)->sin6_addr,
+                    ipbuf, sizeof(ipbuf));
+            }
+            freeaddrinfo(res);
+
+            if (ipbuf[0]) {
+                // Format: "hostname:port:ip"
+                std::string entry = API_HOST + ":443:" + ipbuf;
+                std::string entry80 = API_HOST + ":80:" + ipbuf;
+                resolve_list = curl_slist_append(resolve_list, entry.c_str());
+                resolve_list = curl_slist_append(resolve_list, entry80.c_str());
+                fprintf(stderr, "[DNS] Pre-resolved %s -> %s\n", API_HOST.c_str(), ipbuf);
+            }
+        } else {
+            fprintf(stderr, "[DNS] Pre-resolve failed — workers will resolve individually\n");
+        }
+    }
+
+    // Initialise one persistent CURL handle per worker
     for (std::size_t i = 0; i < n; ++i) {
         CURL* curl = curl_easy_init();
         if (!curl) {
             fprintf(stderr, "runFullURLFetch: curl_easy_init failed for worker %zu\n", i);
-            // Clean up handles already created
             for (std::size_t j = 0; j < i; ++j) curl_easy_cleanup(args[j].curl);
             return false;
         }
 
-        // -- Browser identity -------------------------------------------------
-        // Spoofing a real browser User-Agent causes the server to treat
-        // requests the same as dashboard website traffic, bypassing
-        // aggressive connection throttling aimed at bots.
+        // Attach the shared DNS cache
+        if (curl_share_)
+            curl_easy_setopt(curl, CURLOPT_SHARE, curl_share_);
+
+        // Inject pre-resolved IP — workers never touch DNS again
+        if (resolve_list)
+            curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve_list);
+
+        // Use the CA bundle path detected once at construction
+        if (!ca_bundle_path_.empty())
+            curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle_path_.c_str());
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+        // Browser identity — set once, inherited for all requests
         curl_easy_setopt(curl, CURLOPT_USERAGENT,
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -116,27 +224,27 @@ bool CaliforniaDashboardAPI::runFullURLFetch()
         headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
         headers = curl_slist_append(headers, "Connection: keep-alive");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        // Note: headers list must outlive the handle. We free it in poolWorker.
 
-        // -- Connection reuse -------------------------------------------------
-        // TCP keep-alive probes the connection every 30s so the OS doesn't
-        // close idle sockets between sequential requests from this worker.
+        // TCP keep-alive so idle sockets don't get closed between requests
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE,  30L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
 
-        // Keep the DNS result cached for 120s to avoid re-resolving the same
-        // host on every request (default is only 60s).
-        curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 120L);
+        // Extended DNS cache TTL
+        curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
 
-        // Follow redirects and set timeout
+        // HTTP/2 — allows request multiplexing on a single TCP connection.
+        // Falls back to HTTP/1.1 automatically if the server doesn't support it.
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+
+        // Disable Nagle — reduces latency for small request/response cycles
+        curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
+
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,     timeout_ms_);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  &CaliforniaDashboardAPI::write_callback);
 
-        // Write callback — overridden per-request with CURLOPT_WRITEDATA
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &CaliforniaDashboardAPI::write_callback);
-
-        args[i] = { this, &queue, curl };
+        args[i] = { this, &queue, curl, 0 };
     }
 
     // Spawn workers
@@ -151,13 +259,13 @@ bool CaliforniaDashboardAPI::runFullURLFetch()
             }
             queue.cv.notify_all();
             for (std::size_t j = 0; j < spawned; ++j) pthread_join(tids[j], nullptr);
-            for (std::size_t j = 0; j < n; ++j)       curl_easy_cleanup(args[j].curl);
+            for (std::size_t j = 0; j < n;       ++j) curl_easy_cleanup(args[j].curl);
             return false;
         }
         ++spawned;
     }
 
-    // Signal no more work will be enqueued
+    // Signal queue is fully loaded
     {
         std::lock_guard<std::mutex> lk(queue.mtx);
         queue.done = true;
@@ -167,9 +275,11 @@ bool CaliforniaDashboardAPI::runFullURLFetch()
     for (std::size_t i = 0; i < spawned; ++i)
         pthread_join(tids[i], nullptr);
 
-    // Clean up persistent handles after all threads have exited
     for (std::size_t i = 0; i < n; ++i)
         curl_easy_cleanup(args[i].curl);
+
+    if (resolve_list)
+        curl_slist_free_all(resolve_list);
 
     return true;
 }
@@ -194,32 +304,35 @@ void* CaliforniaDashboardAPI::poolWorker(void* raw)
             q.items.pop();
         }
 
-        // Throttle globally before firing the request
+        // Global rate limiter
         a->self->acquireToken();
 
-        // Fetch using this worker's persistent CURL handle
-        SummaryCard card;
-        a->self->fetchSummaryCard(a->curl, url, card);
+        // Claim a slot in the pre-sized results vector — lock-free
+        std::size_t slot = a->self->next_slot_.fetch_add(1, std::memory_order_relaxed);
 
-        {
-            std::lock_guard<std::mutex> lk(a->self->mutex_);
-            a->self->allSummaryCardsVector.push_back(std::move(card));
-        }
+        // Fetch directly into the pre-allocated slot — no lock needed
+        a->self->fetchSummaryCard(a->curl, url, a->self->allSummaryCardsVector[slot]);
 
-        // Progress bar
+        // Progress bar — atomic increment first, then only lock stderr
+        // every ~0.25% of total work to avoid the mutex becoming a bottleneck.
         {
             std::size_t done  = ++a->self->completed_;
             std::size_t total = a->self->total_;
-            int pct    = static_cast<int>(done * 100 / total);
-            int filled = pct / 2;
+            std::size_t print_every = std::max(std::size_t(1), total / 400);
 
-            fprintf(stderr, "\r  [");
-            for (int i = 0; i < 50; ++i)
-                fputc(i < filled ? '#' : '-', stderr);
-            fprintf(stderr, "] %3d%%  %zu/%zu", pct, done, total);
-            fflush(stderr);
+            if (done % print_every == 0 || done == total) {
+                std::lock_guard<std::mutex> lk(a->self->progress_mutex_);
+                int pct    = static_cast<int>(done * 100 / total);
+                int filled = pct / 2;
 
-            if (done == total) fputc('\n', stderr);
+                fprintf(stderr, "\r  [");
+                for (int i = 0; i < 50; ++i)
+                    fputc(i < filled ? '#' : '-', stderr);
+                fprintf(stderr, "] %3d%%  %zu/%zu", pct, done, total);
+                fflush(stderr);
+
+                if (done == total) fputc('\n', stderr);
+            }
         }
     }
 
@@ -239,13 +352,15 @@ size_t CaliforniaDashboardAPI::write_callback(char* ptr, size_t size,
 }
 
 // =============================================================================
-// acquireToken  —  global token bucket rate limiter
+// acquireToken  —  global token bucket
 // =============================================================================
 
 void CaliforniaDashboardAPI::acquireToken()
 {
-    std::unique_lock<std::mutex> lk(rate_mutex_);
+    // If unlimited, return immediately — zero overhead on the hot path.
+    if (max_requests_per_sec_ >= 1000.0) return;
 
+    std::unique_lock<std::mutex> lk(rate_mutex_);
     while (true) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -258,15 +373,11 @@ void CaliforniaDashboardAPI::acquireToken()
             tokens_ = max_requests_per_sec_;
         last_refill_ = now;
 
-        if (tokens_ >= 1.0) {
-            tokens_ -= 1.0;
-            return;
-        }
+        if (tokens_ >= 1.0) { tokens_ -= 1.0; return; }
 
         double wait_sec = (1.0 - tokens_) / max_requests_per_sec_;
         long   wait_ns  = static_cast<long>(wait_sec * 1e9);
         struct timespec ts = { wait_ns / 1'000'000'000L, wait_ns % 1'000'000'000L };
-
         lk.unlock();
         nanosleep(&ts, nullptr);
         lk.lock();
@@ -274,7 +385,7 @@ void CaliforniaDashboardAPI::acquireToken()
 }
 
 // =============================================================================
-// fetchSummaryCard  —  uses caller-supplied persistent CURL handle
+// fetchSummaryCard
 // =============================================================================
 
 static bool isRetryable(CURLcode code) {
@@ -295,11 +406,9 @@ CURLcode CaliforniaDashboardAPI::fetchSummaryCard(CURL*              curl,
                                                    const std::string& url,
                                                    SummaryCard&       card)
 {
-    static constexpr int  MAX_RETRIES   = 4;
-    static constexpr long BASE_DELAY_MS = 500; // doubles each retry
+    static constexpr int  MAX_RETRIES   = 3;
+    static constexpr long BASE_DELAY_MS = 250; // shorter backoff at high speed
 
-    // Point this handle at the new URL and new card buffer.
-    // All other options (headers, keep-alive, etc.) are already set.
     curl_easy_setopt(curl, CURLOPT_URL,       url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &card);
 

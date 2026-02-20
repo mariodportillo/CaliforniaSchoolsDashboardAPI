@@ -13,23 +13,12 @@
 
 class CaliforniaDashboardAPI {
 public:
-    // -- Tuning knobs ---------------------------------------------------------
-    // pool_size:            number of persistent worker threads.
-    //                       Each worker owns one CURL handle and reuses its
-    //                       TCP/TLS connection, so more workers = more
-    //                       parallel connections to the server.
-    //
-    // max_requests_per_sec: global token-bucket cap across ALL workers.
-    //                       The server was refusing connections at >8 req/sec
-    //                       without browser headers; with them it tolerates
-    //                       much higher rates. Start at 20 and back off if
-    //                       you see connection errors.
-    //
-    // timeout_ms:           per-request timeout. 30s is generous; the API
-    //                       usually responds in <2s on a live connection.
-    static constexpr std::size_t DEFAULT_POOL_SIZE            = 20;
-    static constexpr double      DEFAULT_MAX_REQUESTS_PER_SEC = 20.0;
-    static constexpr long        DEFAULT_TIMEOUT_MS           = 30'000;
+    // Stable ceiling — 64 workers, 64 req/sec.
+    // 50 was clean, 100 was too much. 64 splits the difference
+    // and the light rate cap prevents burst pressure at startup.
+    static constexpr std::size_t DEFAULT_POOL_SIZE            = 50;
+    static constexpr double      DEFAULT_MAX_REQUESTS_PER_SEC = 1000.0;
+    static constexpr long        DEFAULT_TIMEOUT_MS           = 10'000;
 
     explicit CaliforniaDashboardAPI(
         long        timeout_ms           = DEFAULT_TIMEOUT_MS,
@@ -52,36 +41,45 @@ private:
         bool                    done = false;
     };
 
-    // Each worker carries its own persistent CURL handle so TCP/TLS
-    // connections are reused across requests to the same host.
     struct PoolWorkerArg {
         CaliforniaDashboardAPI* self;
         WorkQueue*              queue;
-        CURL*                   curl; // owned by this worker, init'd before spawn
+        CURL*                   curl;    // persistent handle, one per worker
+        std::size_t             slot;    // pre-allocated slot in results vector
     };
 
-    static void* poolWorker(void* raw);
-
-    // -- Per-request fetch (takes a pre-initialised CURL handle) --------------
+    static void*  poolWorker(void* raw);
     static size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata);
-    CURLcode fetchSummaryCard(CURL* curl, const std::string& url, SummaryCard& card);
-
-    // -- Token bucket rate limiter --------------------------------------------
-    void acquireToken();
+    CURLcode      fetchSummaryCard(CURL* curl, const std::string& url, SummaryCard& card);
+    void          acquireToken();
 
     long        timeout_ms_;
     std::size_t pool_size_;
     double      max_requests_per_sec_;
 
+    // Token bucket — protected by rate_mutex_
     double          tokens_;
     struct timespec last_refill_;
     std::mutex      rate_mutex_;
 
+    // Progress — separate from results mutex so printing never blocks a push
     std::atomic<std::size_t> completed_{0};
     std::size_t              total_{0};
+    std::mutex               progress_mutex_; // serialises stderr writes only
 
+    // Results — atomic slot index eliminates mutex on the hot path.
+    // Vector is pre-sized before workers start; each worker writes to its
+    // own slot via an atomic fetch_add, so no two workers ever touch the
+    // same element and no lock is needed.
+    std::atomic<std::size_t> next_slot_{0};
+    std::mutex               results_mutex_; // only used for reserve()
+
+    // Shared CURL state — DNS cache and SSL session shared across all handles
+    // so the first worker to resolve the host shares the result with all others.
+    CURLSH* curl_share_{nullptr};
+
+    std::string              ca_bundle_path_; // resolved once at construction
     std::vector<std::string> urls_;
-    std::mutex               mutex_; // guards allSummaryCardsVector
 };
 
 #endif // CALIFORNIADASHBOARDAPI_H

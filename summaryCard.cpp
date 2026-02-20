@@ -9,12 +9,16 @@ using json = nlohmann::json;
 // =============================================================================
 
 SummaryCard::SummaryCard(){
+    // init empty data
     rawData     = "";
     rawJsonData = json::array();
 }
 
 SummaryCard::SummaryCard(const std::string& jsonString) : rawData(jsonString) {
+    // When provided valid jsonString we can now parse the data
     parseRawData();
+    
+    // We also parseIndicators here as well as outlined by our indicator struct  
     indicatorVector = parseIndicators(rawJsonData);
 }
 
@@ -36,9 +40,10 @@ void SummaryCard::appendRawData(const char* data, size_t size) {
 
 void SummaryCard::parseRawData() {
     if (rawData.empty()) return;
-
+    // we safely go in and try to parseRawData input 
     try {
         rawJsonData     = json::parse(rawData);
+        // we need to parse the indicators themselves
         indicatorVector = parseIndicators(rawJsonData);
     }
     catch (const json::parse_error& e) {
@@ -56,9 +61,9 @@ void SummaryCard::clear() {
     schoolName.clear();
     year.clear();
 }
-
-// Stamps the human-readable school name and year onto the card.
-// Called after fetching, using the reverse lookup built in main.
+// This helpful function will help make sure we can assign a card a schoolName and year. 
+// This can only be done by the caller since the summary cards and json do not have 
+// this information within the data. 
 void SummaryCard::setMetadata(const std::string& school, const std::string& yr) {
     schoolName = school;
     year       = yr;
@@ -204,15 +209,16 @@ static bool safeBool(const json& obj, const std::string& key, bool defaultVal = 
     if (obj[key].is_boolean()) return obj[key].get<bool>();
     return defaultVal;
 }
-
+// The following is used to build an indicator from the json we get from the California Dashboard
 SummaryCard::indicator SummaryCard::parseIndicator(const json& entry) {
     indicator ind;
 
+    // We return an empty indicator if we do not have valid json
     if (!entry.is_object()) {
         std::cerr << "[WARN] parseIndicator: entry is not a JSON object, skipping.\n";
         return ind;
     }
-
+    // We go ahead and use safe parsers to ensure we properly populate the indicator data
     ind.indicatorId = safeSizeT(entry, "indicatorId");
 
     auto it = indicatorsMap.find(static_cast<int>(ind.indicatorId));
@@ -222,6 +228,7 @@ SummaryCard::indicator SummaryCard::parseIndicator(const json& entry) {
     ind.secondary = entry.contains("secondary") ? entry["secondary"] : json(nullptr);
 
     const json& p = ind.primary;
+    // we build our indicator and populate all of our fields
     if (!p.is_null() && p.is_object()) {
         ind.cdsCode       = safeString(p, "cdsCode");
         ind.status        = safeFloat (p, "status");
@@ -247,6 +254,7 @@ SummaryCard::indicator SummaryCard::parseIndicator(const json& entry) {
     return ind;
 }
 
+// Use this function to go through every indicator withing a given SummaryCard json format. 
 std::vector<SummaryCard::indicator> SummaryCard::parseIndicators(const json& data) {
     std::vector<indicator> result;
 

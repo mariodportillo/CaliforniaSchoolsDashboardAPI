@@ -6,6 +6,7 @@
 #include <map>
 
 class SummaryCard {
+    // A helpful map to use for lookup of indciatorIDs to category
     std::map<int, std::string> indicatorsMap = {
         {1, "CHRONIC_ABSENTEEISM"},
         {2, "SUSPENSION_RATE"},
@@ -16,7 +17,7 @@ class SummaryCard {
         {7, "MATHEMATICS"},
         {8, "SCIENCE"}
     };
-
+    // our indicator struct to hold all the following data. 
     struct indicator {
         std::string indicatorCategory;
         nlohmann::json primary;
@@ -80,7 +81,7 @@ public:
     bool printRawData() const;
     bool printIndicatorVector() const;
 
-    // Export
+    // Export and import
     bool saveToFile(const std::string& filename) const;
     bool loadFromFile(const std::string& filename);
 };
