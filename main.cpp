@@ -5,7 +5,9 @@ int main()
 {
     SchoolResolver resolver("../pubschls.db");
 
-    auto [urls, metadata] = resolver.buildURLs({"2021", "2022", "2023", "2024"});
+    SchoolResolver::BuildResult result   = resolver.buildURLs({"2021", "2022", "2023", "2024"});
+    std::vector<std::string>&   urls     = result.urls;
+    SchoolResolver::URLMetadata& metadata = result.metadata;
 
     CaliforniaDashboardAPI api;
     api.loadInURLs(urls);
