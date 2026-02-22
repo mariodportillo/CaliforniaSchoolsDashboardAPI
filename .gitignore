@@ -19,3 +19,4 @@ Makefile
 *.dylib
 compile_commands.json
 .cache/
+build-interface-Qt_6_6_1_for_macOS-Debug/
