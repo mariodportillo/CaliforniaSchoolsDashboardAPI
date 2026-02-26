@@ -172,6 +172,9 @@ app/
 
 School data is sourced from the California Department of Education's public schools list and the California School Dashboard API. This project is not affiliated with or endorsed by the California Department of Education or the California State Board of Education.
 
+## Disclaimer
+This tool is for educational purposes only. Ensure you comply with the website's terms of service and local regulations when scraping data.
+
 ## License
 
 MIT
