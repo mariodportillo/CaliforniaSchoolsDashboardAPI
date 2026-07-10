@@ -1,0 +1,13 @@
+{
+  "indicatorId": 8,
+  "primary": {
+    "cdsCode": "19649071995901",
+    "indicatorId": 8,
+    "status": 47.8,
+    "change": 1.3,
+    "count": 388,
+    "studentGroup": "ALL",
+    "schoolYearId": 11,
+    "isPrivateData": false
+  }
+}

@@ -1,0 +1,36 @@
+[
+  {
+    "indicatorId": 2,
+    "primary": {
+      "cdsCode": "19649071995901",
+      "indicatorId": 2,
+      "status": 2.5,
+      "change": -1.6,
+      "count": 1619,
+      "schoolYearId": 11,
+      "isPrivateData": false
+    },
+    "secondary": {
+      "cdsCode": "00000000000000",
+      "indicatorId": 2,
+      "status": "2.9",
+      "change": -0.4,
+      "count": 5961200,
+      "schoolYearId": 11,
+      "isPrivateData": false
+    }
+  },
+  {
+    "indicatorId": 4,
+    "primary": {
+      "cdsCode": "19649071995901",
+      "indicatorId": 4,
+      "status": null,
+      "change": null,
+      "count": null,
+      "schoolYearId": 11,
+      "isPrivateData": true
+    },
+    "secondary": null
+  }
+]

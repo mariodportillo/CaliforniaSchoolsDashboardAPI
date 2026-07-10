@@ -2,6 +2,14 @@
 
 A C++ client for fetching and parsing school performance data from the [California School Dashboard](https://www.caschooldashboard.org/) public API.
 
+> **Rust rewrite available.** A Rust port with a local web UI and statistically
+> grounded report generation (CSV, Excel, HTML, PDF) lives in
+> [`california-dashboard-rs/`](california-dashboard-rs/). It preserves this
+> project's documented behavior while correcting defects (see its
+> [README](california-dashboard-rs/README.md) and
+> [CHANGELOG](california-dashboard-rs/CHANGELOG.md)). Run `cargo run --release --
+> serve` in that directory to open the UI.
+
 ## What It Does
 
 The California School Dashboard publishes indicator data for every public school in the state — things like chronic absenteeism, suspension rates, graduation rates, ELA and math performance, and more. This project provides a programmatic way to pull that data by school name and year, without having to manually navigate the dashboard.
