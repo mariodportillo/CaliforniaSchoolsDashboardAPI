@@ -1,0 +1,35 @@
+[package]
+name = "california-dashboard"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust client and local analysis UI for the California School Dashboard API"
+license = "MIT"
+publish = false
+default-run = "california-dashboard"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8.9", features = ["macros"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
+csv = "1.4.0"
+futures = "0.3.32"
+reqwest = { version = "0.13.4", features = ["json"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+rust_xlsxwriter = { version = "0.96.0", features = ["constant_memory"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.10"
+thiserror = "2.0.18"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1.52.3", features = ["full", "test-util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+calamine = "0.33"
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

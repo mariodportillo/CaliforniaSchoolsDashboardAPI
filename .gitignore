@@ -13,6 +13,7 @@ Makefile
 !CMakeLists.txt
 .vscode/
 .idea/
+.claude/
 .DS_Store
 *.a
 *.so

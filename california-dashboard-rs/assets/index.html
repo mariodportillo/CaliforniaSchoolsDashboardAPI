@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#173f39">
+    <meta name="description" content="Pull, review, and export California School Dashboard data with transparent statistical context.">
+    <title>California Dashboard Workbench</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script defer src="/assets/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to workspace</a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="California Dashboard Workbench home">
+          <span class="brand-mark" aria-hidden="true">CA</span>
+          <span>
+            <span class="brand-name">Dashboard Workbench</span>
+            <span class="brand-subtitle">California public school data</span>
+          </span>
+        </a>
+        <div class="header-status" title="This application only listens on your computer">
+          <span class="status-dot" aria-hidden="true"></span>
+          Local and private
+        </div>
+      </div>
+    </header>
+
+    <main id="workspace">
+      <section class="hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">California School Dashboard</p>
+          <h1 id="page-title">Build a careful, comparable school report.</h1>
+          <p class="hero-copy">Choose schools and reporting years, pull the public source data, and export an analysis that makes missingness and uncertainty visible.</p>
+        </div>
+        <a
+          class="source-note"
+          href="https://www.caschooldashboard.org/"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Official data source: California School Dashboard website (opens in a new tab)"
+        >
+          <svg class="source-logo" viewBox="0 0 360 74" role="img" xmlns="http://www.w3.org/2000/svg">
+            <title>California School Dashboard</title>
+            <rect x="16" y="61" width="92" height="5" rx="2.5" fill="#2E3B4E"/>
+            <path d="M 22.00 60.00 A 40 40 0 0 1 28.38 38.33" fill="none" stroke="#E5342A" stroke-width="15"/>
+            <path d="M 29.97 36.04 A 40 40 0 0 1 48.06 22.51" fill="none" stroke="#F5871F" stroke-width="15"/>
+            <path d="M 50.71 21.63 A 40 40 0 0 1 73.29 21.63" fill="none" stroke="#FDC010" stroke-width="15"/>
+            <path d="M 75.94 22.51 A 40 40 0 0 1 94.03 36.04" fill="none" stroke="#4FA32E" stroke-width="15"/>
+            <path d="M 95.62 38.33 A 40 40 0 0 1 102.00 60.00" fill="none" stroke="#1C75BC" stroke-width="15"/>
+            <g transform="rotate(-20 62 60)">
+              <polygon points="62,12 57.5,24 66.5,24" fill="#E9CF97"/>
+              <polygon points="62,12 60,17.5 64,17.5" fill="#33373D"/>
+              <rect x="57.5" y="24" width="9" height="22" fill="#F6B21B"/>
+              <rect x="57.5" y="46" width="9" height="4" fill="#C9CDD3"/>
+              <rect x="57.5" y="50" width="9" height="8.5" rx="1.5" fill="#EE8E8E"/>
+            </g>
+            <circle cx="62" cy="60" r="6" fill="#2E3B4E"/>
+            <circle cx="62" cy="60" r="2.4" fill="#ffffff"/>
+            <text x="128" y="31" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600" fill="#2E3B4E">California School</text>
+            <text x="127" y="60" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="800" letter-spacing="0.5" fill="#2E3B4E">DASHBOARD</text>
+          </svg>
+          <span class="source-note-caption">Official public source <span aria-hidden="true">↗</span></span>
+        </a>
+      </section>
+
+      <div id="global-alert" class="alert alert-error" role="alert" hidden></div>
+
+      <section class="workflow" aria-label="Report setup">
+        <form id="job-form" class="setup-panel">
+          <div class="panel-heading">
+            <span class="step-number" aria-hidden="true">1</span>
+            <div>
+              <h2>Set up your pull</h2>
+              <p>Select one or more schools, then choose comparable years.</p>
+            </div>
+          </div>
+
+          <fieldset class="form-section school-section">
+            <legend>Schools</legend>
+            <p class="field-hint" id="school-help">Search by school, district, county, or 14-digit CDS code. Results include identity details to prevent name mix-ups.</p>
+            <label class="all-school-toggle" for="all-active-schools">
+              <input id="all-active-schools" type="checkbox">
+              <span>
+                <strong>Pull every active school</strong>
+                <small>Uses all <span id="all-school-count">available</span> active schools from the local CDE directory.</small>
+              </span>
+            </label>
+            <div class="school-combobox">
+              <label class="search-label" for="school-search">
+                <span class="search-icon" aria-hidden="true">⌕</span>
+                <span class="sr-only">Search schools</span>
+                <input
+                  id="school-search"
+                  name="school-search"
+                  type="search"
+                  placeholder="Start typing a school, district, county, or CDS code…"
+                  autocomplete="off"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-controls="school-results"
+                  aria-expanded="false"
+                  aria-describedby="school-help school-search-status"
+                >
+              </label>
+              <div id="school-results" class="search-results" role="listbox" aria-label="Matching schools" aria-multiselectable="true" hidden></div>
+            </div>
+            <p id="school-search-status" class="sr-only" role="status" aria-live="polite"></p>
+
+            <div class="selection-header">
+              <span><strong id="school-count">0</strong> schools selected</span>
+              <button id="clear-schools" class="text-button" type="button" hidden>Clear all</button>
+            </div>
+            <div id="selected-schools" class="selected-schools empty-selection" aria-live="polite">
+              <p>Search above to add schools.</p>
+            </div>
+          </fieldset>
+
+          <fieldset class="form-section">
+            <legend>Reporting years</legend>
+            <p class="field-hint">Select years deliberately. Dashboard measures and availability can change between cycles.</p>
+            <div id="year-options" class="year-grid" aria-describedby="year-message">
+              <div class="loading-line">Loading reporting years…</div>
+            </div>
+            <p id="year-message" class="validation-message" aria-live="polite"></p>
+          </fieldset>
+
+          <details class="settings-disclosure">
+            <summary>
+              <span>
+                <strong>Pull settings</strong>
+                <small>Balanced defaults for the public API</small>
+              </span>
+              <span class="chevron" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="settings-grid">
+              <label>
+                <span>Concurrent requests</span>
+                <input id="setting-concurrency" type="number" min="1" max="64" value="50" inputmode="numeric">
+                <small>1–64 at a time</small>
+              </label>
+              <label>
+                <span>Requests per second</span>
+                <input id="setting-rate" type="number" min="1" max="1000" value="1000" inputmode="numeric">
+                <small>Rate ceiling</small>
+              </label>
+              <label>
+                <span>Timeout</span>
+                <div class="input-suffix">
+                  <input id="setting-timeout" type="number" min="1" max="120" value="10" inputmode="numeric">
+                  <span>sec</span>
+                </div>
+                <small>Per request</small>
+              </label>
+            </div>
+          </details>
+
+          <div class="estimate-row">
+            <div>
+              <span class="estimate-label">Planned requests</span>
+              <strong id="request-estimate">0</strong>
+              <span class="estimate-detail" id="request-estimate-detail">Choose schools and years</span>
+            </div>
+            <button id="start-job" class="primary-button" type="submit" disabled>
+              <span>Pull data &amp; build report</span>
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section id="job-panel" class="job-panel" aria-labelledby="job-title" hidden>
+        <div class="panel-heading job-heading">
+          <span class="step-number" aria-hidden="true">2</span>
+          <div>
+            <p class="eyebrow">Report run</p>
+            <h2 id="job-title">Pulling Dashboard data</h2>
+            <p id="job-status-copy" role="status" aria-live="polite">Preparing requests…</p>
+          </div>
+          <span id="job-state-badge" class="state-badge">Queued</span>
+        </div>
+
+        <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
+        <div class="progress-meta">
+          <span><strong id="progress-completed">0</strong> of <strong id="progress-total">0</strong> requests</span>
+          <span id="progress-percent">0%</span>
+        </div>
+
+        <div id="job-failure" class="alert alert-error" role="alert" hidden></div>
+
+        <div id="quality-summary" class="quality-grid" hidden>
+          <div><span>Usable rows</span><strong id="quality-usable">—</strong></div>
+          <div><span>Suppressed</span><strong id="quality-suppressed">—</strong></div>
+          <div><span>Missing / unavailable</span><strong id="quality-missing">—</strong></div>
+          <div><span>Failed requests</span><strong id="quality-failed">—</strong></div>
+        </div>
+
+        <div id="download-area" class="download-area" hidden>
+          <div>
+            <h3>Your report is ready</h3>
+            <p>Download the complete data or a readable report with methodology and quality notes included.</p>
+          </div>
+          <div class="download-buttons" aria-label="Report downloads">
+            <a id="download-csv" class="download-button" href="#"><strong>CSV</strong><span>Flat data</span></a>
+            <a id="download-xlsx" class="download-button" href="#"><strong>Excel</strong><span>Formatted workbook</span></a>
+            <a id="download-html" class="download-button" href="#"><strong>HTML</strong><span>Web report</span></a>
+            <a id="download-pdf" class="download-button" href="#"><strong>PDF</strong><span>Printable report</span></a>
+          </div>
+        </div>
+      </section>
+
+      <section id="results-section" class="results-section" aria-labelledby="results-title" hidden>
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">Observed data</p>
+            <h2 id="results-title">Result preview</h2>
+            <p id="results-description">A preview of canonical report rows. Download an export for the complete dataset.</p>
+          </div>
+          <label class="compact-search" for="table-filter">
+            <span class="sr-only">Filter result preview</span>
+            <span aria-hidden="true">⌕</span>
+            <input id="table-filter" type="search" placeholder="Filter results…">
+          </label>
+        </div>
+        <div class="table-shell" tabindex="0" role="region" aria-label="Scrollable result table">
+          <table>
+            <thead id="results-head"></thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+        <p id="result-count" class="result-count"></p>
+      </section>
+
+      <section class="methodology" aria-labelledby="methodology-title">
+        <div>
+          <p class="eyebrow">Transparent by default</p>
+          <h2 id="methodology-title">Methodology and responsible interpretation</h2>
+        </div>
+        <div class="methodology-grid">
+          <details>
+            <summary>What the report calculates <span aria-hidden="true">+</span></summary>
+            <p>Reports use descriptive summaries of the API response: counts, observed values, changes supplied by the Dashboard, and explicit data-quality totals. They do not add causal claims, predictive scores, or an overall school ranking.</p>
+          </details>
+          <details>
+            <summary>How missing and private data are handled <span aria-hidden="true">+</span></summary>
+            <p>Suppressed private values, unavailable measures, parse problems, and request failures are labeled separately. Missing values are excluded from numeric summaries and are never treated as zero or imputed.</p>
+          </details>
+          <details>
+            <summary>How to make a sound comparison <span aria-hidden="true">+</span></summary>
+            <p>Compare the same indicator and student group across compatible years. Check denominators, coverage, suppression, and policy or measurement changes. Small observed differences can be practically unimportant and do not, on their own, imply a cause.</p>
+          </details>
+          <details>
+            <summary>Data source and scope <span aria-hidden="true">+</span></summary>
+            <p>School identity comes from the local California public schools database. Indicator values come from the public California School Dashboard API. This independent tool is not affiliated with or endorsed by the State of California.</p>
+          </details>
+        </div>
+      </section>
+
+      <section class="directory-export" aria-labelledby="directory-title">
+        <div class="directory-export-copy">
+          <p class="eyebrow">Reference data</p>
+          <h2 id="directory-title">Complete school directory</h2>
+          <p>Export schools and districts—including inactive records—in the five-column CDE layout.</p>
+        </div>
+        <div class="directory-links">
+          <a href="/api/directory.csv">Directory CSV</a>
+          <a href="/api/directory.xlsx">Directory Excel</a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p class="footer-disclaimer">
+        <strong>Research use only.</strong> This is an independent, research-oriented tool
+        and is not affiliated with or endorsed by the State of California or the California
+        Department of Education. All output is derived from the public
+        <a href="https://www.caschooldashboard.org/" target="_blank" rel="noopener noreferrer">California School Dashboard</a>
+        and should be independently verified against the official source before being used
+        for any decision.
+      </p>
+      <div class="footer-meta">
+        <span>California Dashboard Workbench</span>
+        <span>Local analysis • Public aggregate data • No tracking</span>
+      </div>
+    </footer>
+
+    <noscript><div class="noscript">JavaScript is required to search schools, run pulls, and download reports.</div></noscript>
+  </body>
+</html>
